@@ -1,0 +1,6 @@
+[directories]
+# Source directory for JSON configuration files
+source = "sources"
+
+# Output directory for merged configuration files
+output = "outputs"

@@ -1,0 +1,16 @@
+[project]
+name = "cyberboard-merger"
+version = "1.0.0"
+description = "CYBERBOARD R4 Configuration Merger Tool"
+dependencies = ["rich>=13.0.0", "questionary>=2.0.0", "toml>=0.10.2"]
+requires-python = ">=3.6"
+
+[project.scripts]
+cyberboard-merger = "cyberboard_merger:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["cyberboard_merger"]
