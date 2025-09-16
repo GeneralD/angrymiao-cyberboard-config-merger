@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import threading
+import select
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Union
@@ -26,6 +27,7 @@ from rich.align import Align
 from rich.box import ROUNDED
 from rich.prompt import Prompt, Confirm
 from rich.columns import Columns
+from rich.console import Group
 import questionary
 from questionary import Style
 
@@ -45,12 +47,15 @@ class LEDPreviewAnimator:
     """Handles LED animation preview in terminal"""
     
     def __init__(self, width=40, height=5):
-        self.width = width
-        self.height = height
+        self.width = width  # LED grid width (40)
+        self.height = height  # LED grid height (5)
+        self.display_width = width * 2  # Display width (80 chars for square appearance)
         self.frames = []
         self.current_frame = 0
         self.running = False
         self.thread = None
+        self.fps = 10  # 10 frames per second
+        self.frame_delay = 1.0 / self.fps  # 0.1 seconds per frame
         
     def load_frames(self, page_data: Dict):
         """Load frames from page data"""
@@ -90,18 +95,62 @@ class LEDPreviewAnimator:
                         r = int(color[1:3], 16)
                         g = int(color[3:5], 16)
                         b = int(color[5:7], 16)
-                        row.append(f"[rgb({r},{g},{b})]█[/]")
+                        # Use two characters to make square appearance
+                        row.append(f"[rgb({r},{g},{b})]██[/]")
                     else:
-                        row.append("█")
+                        row.append("██")
                 else:
-                    row.append(" ")
+                    row.append("  ")
             display.append("".join(row))
             
         return "\n".join(display)
         
     def _generate_empty_display(self) -> str:
         """Generate empty display grid"""
-        return "\n".join(["░" * self.width for _ in range(self.height)])
+        return "\n".join(["░░" * self.width for _ in range(self.height)])
+    
+    def get_synchronized_frame(self, target_frame_count: int, current_position: int) -> int:
+        """Get frame index for synchronized animation with looping
+        
+        Args:
+            target_frame_count: Total frames in the longest animation
+            current_position: Current position (0 to target_frame_count-1)
+        
+        Returns:
+            Frame index for this animation with looping
+        """
+        if not self.frames or target_frame_count <= 0:
+            return 0
+        
+        animation_length = len(self.frames)
+        if animation_length == 0:
+            return 0
+        
+        # Calculate which frame to show based on current position
+        return current_position % animation_length
+    
+    def wait_for_any_key(self) -> bool:
+        """Check if Enter key was pressed (non-blocking)
+        
+        Returns:
+            True if Enter key was pressed, False otherwise
+        """
+        if sys.stdin.isatty():
+            # Use select for non-blocking input check (Unix/Linux/macOS)
+            if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+                # Read any input and clear the buffer
+                try:
+                    line = sys.stdin.readline()
+                    # Clear any remaining input buffer
+                    while select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+                        try:
+                            sys.stdin.readline()
+                        except:
+                            break
+                    return True
+                except:
+                    return False
+        return False
         
     def start_animation(self, callback=None):
         """Start animation in background thread"""
@@ -123,6 +172,83 @@ class LEDPreviewAnimator:
         self.running = False
         if self.thread:
             self.thread.join(timeout=0.5)
+    
+    @staticmethod
+    def show_animations(animators, titles, border_styles=None, instruction: str = "Press Enter to continue...") -> None:
+        """Show LED animations with unified layout (supports single or multiple)
+        
+        Args:
+            animators: Single LEDPreviewAnimator or List of LEDPreviewAnimators
+            titles: Single title string or List of title strings
+            border_styles: Single border style string or List of border style strings (optional)
+            instruction: Instruction text
+        """
+        # Convert single items to lists for unified processing
+        if not isinstance(animators, list):
+            animators = [animators]
+        if not isinstance(titles, list):
+            titles = [titles]
+        if border_styles is not None and not isinstance(border_styles, list):
+            border_styles = [border_styles]
+            
+        if not animators or not titles:
+            return
+            
+        # Default border styles if not provided
+        if border_styles is None:
+            border_styles = ["blue"] * len(animators)
+        elif len(border_styles) < len(animators):
+            # Extend border_styles to match animators length
+            border_styles.extend(["blue"] * (len(animators) - len(border_styles)))
+            
+        # Filter animators with frames
+        valid_animators = [(a, t, b) for a, t, b in zip(animators, titles, border_styles) if len(a.frames) > 0]
+        if not valid_animators:
+            return
+            
+        animators, titles, border_styles = zip(*valid_animators)
+        animators, titles, border_styles = list(animators), list(titles), list(border_styles)
+        
+        max_frames = max(len(a.frames) for a in animators)
+        with Live(refresh_per_second=10, console=console) as live:
+            frame_position = 0
+            frame_delay = animators[0].frame_delay if animators else 0.1
+            
+            while True:
+                previews = []
+                for animator, title, border_style in zip(animators, titles, border_styles):
+                    # Use synchronized frame logic for consistent looping
+                    frame_index = animator.get_synchronized_frame(max_frames, frame_position)
+                    
+                    # Set expand=False for single panel to fit content
+                    is_single = len(animators) == 1
+                    panel = Panel(
+                        animator.get_frame_display(frame_index),
+                        title=f"[bold]{title}[/]",
+                        border_style=border_style,
+                        expand=not is_single
+                    )
+                    previews.append(panel)
+                
+                # Use single panel or columns layout based on count
+                if len(previews) == 1:
+                    display_content = previews[0]
+                else:
+                    display_content = Columns(previews, equal=True, expand=True)
+                
+                instruction_text = Text(instruction, style="dim")
+                content = Group(display_content, "", instruction_text)
+                
+                # Clear the live display before updating to prevent overlap
+                live.update(content)
+                frame_position = (frame_position + 1) % max_frames
+                time.sleep(frame_delay)
+                
+                # Check for Enter key
+                if animators[0].wait_for_any_key():
+                    # Small delay to allow final render to complete
+                    time.sleep(0.05)
+                    break
 
 class CyberboardMerger:
     """Main application class"""
@@ -300,10 +426,10 @@ class CyberboardMerger:
             
     def preview_base_leds_animated(self):
         """Preview base file's custom LED configurations with animation"""
-        console.print("\n[bold]Current Custom LED Configurations (3 seconds):[/]\n")
+        console.print("\n[bold]Base LED Configuration Preview:[/]")
         
         animators = []
-        max_frames = 0
+        titles = []
         for i in range(3):
             page_idx = 5 + i
             page_data = self.base_data['page_data'][page_idx]
@@ -311,31 +437,9 @@ class CyberboardMerger:
             animator = LEDPreviewAnimator()
             animator.load_frames(page_data)
             animators.append(animator)
-            max_frames = max(max_frames, len(animator.frames))
+            titles.append(f"Custom LED {i+1}")
         
-        # Calculate frame delay to fit animation in 3 seconds
-        if max_frames > 0:
-            frame_delay = 3.0 / max_frames
-        else:
-            frame_delay = 0.2
-        
-        # Show animated preview for 3 seconds
-        with Live(refresh_per_second=10, console=console) as live:
-            start_time = time.time()
-            while time.time() - start_time < 3:
-                previews = []
-                for i, animator in enumerate(animators):
-                    panel = Panel(
-                        animator.get_frame_display(),
-                        title=f"[bold]Custom LED {i+1}[/]",
-                        border_style="blue"
-                    )
-                    previews.append(panel)
-                    animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                
-                columns = Columns(previews, equal=True, expand=True)
-                live.update(columns)
-                time.sleep(frame_delay)
+        LEDPreviewAnimator.show_animations(animators, titles, "blue")
     
     def get_frame_count(self, page_data: Dict) -> int:
         """Get the number of frames in a page data"""
@@ -400,24 +504,14 @@ class CyberboardMerger:
             console.print(f"[cyan]Remaining capacity: {self.MAX_FRAMES - current_frames} frames[/]\n")
             
             # Show animated preview of current configuration
+            console.print(f"[bold]Current LED {led_num} Preview:[/]")
             animator = LEDPreviewAnimator()
             animator.load_frames(current_page_data)
-            
-            if len(animator.frames) > 0:
-                frame_delay = min(3.0 / len(animator.frames), 0.2)
-                
-                console.print(f"[bold]Current LED {led_num} Preview (3 seconds):[/]")
-                with Live(refresh_per_second=10, console=console) as live:
-                    start_time = time.time()
-                    while time.time() - start_time < 3:
-                        panel = Panel(
-                            animator.get_frame_display(),
-                            title=f"[bold]LED {led_num} ({current_frames} frames)[/]",
-                            border_style="green"
-                        )
-                        live.update(panel)
-                        animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                        time.sleep(frame_delay)
+            LEDPreviewAnimator.show_animations(
+                animator, 
+                f"LED {led_num} ({current_frames} frames)", 
+                "green"
+            )
             
             # First action or continue adding
             if not combined_sources:
@@ -516,6 +610,8 @@ class CyberboardMerger:
         animators = []
         frame_counts = []
         choices = []
+        titles = []
+        border_styles = []
         
         for i in range(3):
             source_page = source_data['page_data'][5 + i]
@@ -526,42 +622,20 @@ class CyberboardMerger:
             frame_count = self.get_frame_count(source_page)
             frame_counts.append(frame_count)
             
-            # Build choice text with frame count info
+            # Build choice text and styling
             if frame_count <= max_additional_frames:
                 choice_text = f"LED {i+1} ({frame_count} frames) ✓"
                 choices.append(choice_text)
+                titles.append(f"LED {i+1} - ✓ {frame_count} frames")
+                border_styles.append("green")
             else:
                 choice_text = f"LED {i+1} ({frame_count} frames) ❌ Exceeds limit"
-                # Don't add to choices - not selectable
+                titles.append(f"LED {i+1} - ❌ {frame_count} frames (exceeds)")
+                border_styles.append("red")
         
-        # Show animation preview of all LEDs
-        max_frames = max(len(a.frames) for a in animators) if animators else 0
-        if max_frames > 0:
-            frame_delay = min(3.0 / max_frames, 0.2)
-            
-            with Live(refresh_per_second=10, console=console) as live:
-                start_time = time.time()
-                while time.time() - start_time < 3:
-                    previews = []
-                    for i, (animator, fc) in enumerate(zip(animators, frame_counts)):
-                        if fc <= max_additional_frames:
-                            border_style = "green"
-                            status = f"✓ {fc} frames"
-                        else:
-                            border_style = "red"
-                            status = f"❌ {fc} frames (exceeds)"
-                        
-                        panel = Panel(
-                            animator.get_frame_display(),
-                            title=f"[bold]LED {i+1} - {status}[/]",
-                            border_style=border_style
-                        )
-                        previews.append(panel)
-                        animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                    
-                    columns = Columns(previews, equal=True, expand=True)
-                    live.update(columns)
-                    time.sleep(frame_delay)
+        # Show animation preview using unified function
+        console.print("[bold]LED Preview:[/]")
+        LEDPreviewAnimator.show_animations(animators, titles, border_styles)
         
         if not choices:
             console.print("[red]No LEDs fit within the remaining frame limit![/]")
@@ -639,11 +713,11 @@ class CyberboardMerger:
                 
         console.print(table)
         
-        # Animate final preview
-        console.print("\n[bold]Final LED Configuration Preview (3 seconds):[/]\n")
+        # Prepare animators and titles for final preview
+        console.print("\n[bold]Final LED Configuration Preview:[/]\n")
         
         animators = []
-        max_frames = 0
+        titles = []
         for i in range(1, 4):
             mapping = self.mappings[i]
             animator = LEDPreviewAnimator()
@@ -658,31 +732,10 @@ class CyberboardMerger:
                 
             animator.load_frames(page_data)
             animators.append(animator)
-            max_frames = max(max_frames, len(animator.frames))
+            titles.append(f"Final LED {i} ({len(animator.frames)} frames)")
         
-        # Calculate frame delay to fit animation in 3 seconds
-        if max_frames > 0:
-            frame_delay = 3.0 / max_frames
-        else:
-            frame_delay = 0.2
-        
-        with Live(refresh_per_second=10, console=console) as live:
-            start_time = time.time()
-            while time.time() - start_time < 3:
-                previews = []
-                for i, animator in enumerate(animators):
-                    frame_info = f"({len(animator.frames)} frames)"
-                    panel = Panel(
-                        animator.get_frame_display(),
-                        title=f"[bold]Final LED {i+1} {frame_info}[/]",
-                        border_style="green"
-                    )
-                    previews.append(panel)
-                    animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                
-                columns = Columns(previews, equal=True, expand=True)
-                live.update(columns)
-                time.sleep(frame_delay)
+        # Show final preview using unified function
+        LEDPreviewAnimator.show_animations(animators, titles, "green")
         
         choice = questionary.select(
             "\nProceed with merge?",
