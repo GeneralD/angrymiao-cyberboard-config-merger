@@ -127,6 +127,8 @@ class LEDPreviewAnimator:
 class CyberboardMerger:
     """Main application class"""
     
+    MAX_FRAMES = 300  # Maximum frames per LED
+    
     def __init__(self):
         self.base_file = None
         self.base_data = None
@@ -228,9 +230,9 @@ class CyberboardMerger:
                 choice = questionary.select(
                     "What would you like to do?",
                     choices=[
-                        "1. Retry after adding JSON files",
-                        "2. Reload config.toml and retry",
-                        "3. Exit application"
+                        "Retry after adding JSON files",
+                        "Reload config.toml and retry",
+                        "Exit application"
                     ],
                     style=custom_style,
                     use_shortcuts=True
@@ -255,30 +257,26 @@ class CyberboardMerger:
             
         console.print(Panel("[bold cyan]Step 1: Select Base Configuration File[/]", expand=False))
         
-        # Add number prefixes for keyboard shortcuts
-        numbered_choices = [f"{i+1}. {file}" for i, file in enumerate(files)]
-        
         choice = questionary.select(
             "Choose base file (use arrows or number keys):",
-            choices=numbered_choices + ["← Back to Main Menu"],
+            choices=files + ["← Quit"],
             style=custom_style,
             use_shortcuts=True
         ).ask()
         
-        if choice == "← Back to Main Menu" or choice is None:
+        if choice == "← Quit" or choice is None:
             return None
             
-        # Extract filename from numbered choice
+        # Extract filename from choice
         if choice:
-            file_name = choice.split('. ', 1)[1] if '. ' in choice else choice
-            self.base_file = file_name
-            full_path = os.path.join(self.source_dir, file_name)
+            self.base_file = choice
+            full_path = os.path.join(self.source_dir, choice)
             with open(full_path, 'r', encoding='utf-8') as f:
                 self.base_data = json.load(f)
                 
-            console.print(f"\n[green]✓[/] Base file selected: [bold]{file_name}[/]")
+            console.print(f"\n[green]✓[/] Base file selected: [bold]{choice}[/]")
             self.preview_base_leds_animated()
-            return file_name
+            return choice
             
         return None
         
@@ -339,132 +337,263 @@ class CyberboardMerger:
                 live.update(columns)
                 time.sleep(frame_delay)
     
+    def get_frame_count(self, page_data: Dict) -> int:
+        """Get the number of frames in a page data"""
+        if not page_data:
+            return 0
+            
+        frames_data = page_data.get('frames', {})
+        if frames_data.get('valid', 0) == 0:
+            frames_data = page_data.get('keyframes', {})
+            
+        return len(frames_data.get('frame_data', []))
+    
+    def combine_led_frames(self, page_data_list: List[Dict]) -> Dict:
+        """Combine multiple LED page data into one"""
+        if not page_data_list:
+            return {}
+        
+        # Start with the first page's data as base
+        combined = copy.deepcopy(page_data_list[0])
+        
+        # Determine which frame structure to use
+        frames_key = 'frames' if combined.get('frames', {}).get('valid', 0) == 1 else 'keyframes'
+        combined_frames = combined.get(frames_key, {})
+        combined_frame_list = list(combined_frames.get('frame_data', []))
+        
+        # Add frames from remaining pages
+        for page_data in page_data_list[1:]:
+            frames_data = page_data.get('frames', {})
+            if frames_data.get('valid', 0) == 0:
+                frames_data = page_data.get('keyframes', {})
+            
+            frame_list = frames_data.get('frame_data', [])
+            combined_frame_list.extend(frame_list)
+        
+        # Renumber frame_index for all frames
+        for idx, frame in enumerate(combined_frame_list):
+            frame['frame_index'] = idx
+        
+        # Update the combined frame data with correct frame_num
+        combined_frames['frame_data'] = combined_frame_list
+        combined_frames['frame_num'] = len(combined_frame_list)
+        combined[frames_key] = combined_frames
+        
+        return combined
             
     def configure_led_mapping(self, led_num: int) -> Dict:
-        """Configure mapping for a single LED"""
+        """Configure mapping for a single LED with continuous addition support"""
         console.print(f"\n[bold cyan]Configure Custom LED {led_num}[/]")
         
         page_idx = 4 + led_num
-        current_page = self.base_data['page_data'][page_idx]
+        current_page_data = copy.deepcopy(self.base_data['page_data'][page_idx])
+        current_frames = self.get_frame_count(current_page_data)
+        combined_sources = []  # Track all combined sources
         
-        animator = LEDPreviewAnimator()
-        animator.load_frames(current_page)
-        
-        # Calculate frame delay for 3 seconds animation
-        if len(animator.frames) > 0:
-            frame_delay = 3.0 / len(animator.frames)
-        else:
-            frame_delay = 0.2
-        
-        # Show animated preview of current base LED
-        console.print(f"\n[bold]Current Base LED {led_num} (3 seconds):[/]")
-        with Live(refresh_per_second=10, console=console) as live:
-            start_time = time.time()
-            while time.time() - start_time < 3:
-                panel = Panel(
-                    animator.get_frame_display(),
-                    title=f"[bold]Current Base LED {led_num}[/]",
-                    border_style="green"
-                )
-                live.update(panel)
-                animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                time.sleep(frame_delay)
-        
-        action = questionary.select(
-            f"Action for Custom LED {led_num}:",
-            choices=["1. Keep Base", "2. Replace", "← Back"],
-            style=custom_style,
-            use_shortcuts=True
-        ).ask()
-        
-        if action == "← Back" or action is None:
-            return {"action": "back"}
-        elif "Keep Base" in action:
-            return {"action": "keep"}
-        elif "Replace" in action:
-            files = self.get_json_files()
-            numbered_files = [f"{i+1}. {file}" for i, file in enumerate(files)]
+        while True:
+            # Show current status
+            if combined_sources:
+                console.print(f"\n[green]Current configuration:[/]")
+                for src in combined_sources:
+                    console.print(f"  • {src}")
+            console.print(f"[yellow]Current frames: {current_frames}/{self.MAX_FRAMES}[/]")
+            console.print(f"[cyan]Remaining capacity: {self.MAX_FRAMES - current_frames} frames[/]\n")
             
-            source_choice = questionary.select(
-                "Select source file:",
-                choices=numbered_files + ["← Back"],
-                style=custom_style,
-                use_shortcuts=True
-            ).ask()
+            # Show animated preview of current configuration
+            animator = LEDPreviewAnimator()
+            animator.load_frames(current_page_data)
             
-            if source_choice == "← Back" or source_choice is None:
-                return self.configure_led_mapping(led_num)  # Retry this LED config
-            
-            source_file = source_choice.split('. ', 1)[1] if '. ' in source_choice else source_choice
-            
-            if source_file:
-                full_path = os.path.join(self.source_dir, source_file)
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    source_data = json.load(f)
-                    
-                console.print(f"\n[bold]Preview LED configurations from {source_file} (3 seconds):[/]\n")
+            if len(animator.frames) > 0:
+                frame_delay = min(3.0 / len(animator.frames), 0.2)
                 
-                # Animate source LEDs
-                animators = []
-                max_frames = 0
-                for i in range(3):
-                    source_page = source_data['page_data'][5 + i]
-                    animator = LEDPreviewAnimator()
-                    animator.load_frames(source_page)
-                    animators.append(animator)
-                    max_frames = max(max_frames, len(animator.frames))
-                
-                # Calculate frame delay to fit animation in 3 seconds
-                if max_frames > 0:
-                    frame_delay = 3.0 / max_frames
-                else:
-                    frame_delay = 0.2
-                
+                console.print(f"[bold]Current LED {led_num} Preview (3 seconds):[/]")
                 with Live(refresh_per_second=10, console=console) as live:
                     start_time = time.time()
                     while time.time() - start_time < 3:
-                        previews = []
-                        for i, animator in enumerate(animators):
-                            panel = Panel(
-                                animator.get_frame_display(),
-                                title=f"[bold]LED {i+1}[/]",
-                                border_style="yellow"
-                            )
-                            previews.append(panel)
-                            animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
-                        
-                        columns = Columns(previews, equal=True, expand=True)
-                        live.update(columns)
+                        panel = Panel(
+                            animator.get_frame_display(),
+                            title=f"[bold]LED {led_num} ({current_frames} frames)[/]",
+                            border_style="green"
+                        )
+                        live.update(panel)
+                        animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
                         time.sleep(frame_delay)
-                
-                source_led = questionary.select(
-                    "Select source LED:",
-                    choices=["1. LED 1", "2. LED 2", "3. LED 3", "← Back"],
+            
+            # First action or continue adding
+            if not combined_sources:
+                action = questionary.select(
+                    f"Action for Custom LED {led_num}:",
+                    choices=["Keep Base", "Replace", "Combine with Base", "← Back"],
                     style=custom_style,
                     use_shortcuts=True
                 ).ask()
                 
-                if source_led == "← Back" or source_led is None:
-                    return self.configure_led_mapping(led_num)  # Retry this LED config
+                if action == "← Back" or action is None:
+                    return {"action": "back"}
+                elif "Keep Base" in action:
+                    # Just keep base, no combining
+                    return {"action": "keep"}
+                elif "Replace" in action:
+                    # Replace with a source LED
+                    source_result = self.select_source_led(current_frames, self.MAX_FRAMES)
+                    if source_result is None:
+                        continue
+                    
+                    current_page_data = copy.deepcopy(source_result['page_data'])
+                    current_frames = source_result['frame_count']
+                    combined_sources = [f"{source_result['file']} → LED {source_result['led']}"]
+                elif "Combine" in action:
+                    # Keep base and prepare to add more
+                    combined_sources.append(f"Base LED {led_num}")
+            
+            # Ask if want to add another LED
+            if current_frames < self.MAX_FRAMES:
+                add_more = questionary.select(
+                    "\nWhat would you like to do next?",
+                    choices=["Add another LED", "Finish", "← Back"],
+                    style=custom_style,
+                    use_shortcuts=True
+                ).ask()
                 
-                # Extract LED number safely
-                if "LED 1" in source_led:
-                    led_idx = 1
-                elif "LED 2" in source_led:
-                    led_idx = 2
-                elif "LED 3" in source_led:
-                    led_idx = 3
+                if add_more == "← Back" or add_more is None:
+                    # Go back to the initial action selection
+                    current_page_data = copy.deepcopy(self.base_data['page_data'][page_idx])
+                    current_frames = self.get_frame_count(current_page_data)
+                    combined_sources = []
+                    continue
+                elif "Add another" in add_more:
+                    # Select another LED to combine
+                    source_result = self.select_source_led(current_frames, self.MAX_FRAMES - current_frames)
+                    if source_result is None:
+                        continue
+                    
+                    # Combine the frames
+                    combined = self.combine_led_frames([current_page_data, source_result['page_data']])
+                    current_page_data = combined
+                    current_frames += source_result['frame_count']
+                    combined_sources.append(f"{source_result['file']} → LED {source_result['led']}")
                 else:
-                    led_idx = 1  # Default fallback
-                
-                return {
-                    "action": "replace",
-                    "source_file": source_file,
-                    "source_led": led_idx,
-                    "source_data": source_data
-                }
-                
-        return {"action": "keep"}
+                    # Finish
+                    break
+            else:
+                console.print(f"[yellow]Maximum frame limit ({self.MAX_FRAMES}) reached![/]")
+                break
+        
+        # Return the final configuration
+        return {
+            "action": "combined",
+            "page_data": current_page_data,
+            "sources": combined_sources,
+            "frame_count": current_frames
+        }
+    
+    def select_source_led(self, current_frames: int, max_additional_frames: int) -> Optional[Dict]:
+        """Select a source LED with frame count validation"""
+        files = self.get_json_files()
+        
+        source_choice = questionary.select(
+            "Select source file:",
+            choices=files + ["← Back"],
+            style=custom_style,
+            use_shortcuts=True
+        ).ask()
+        
+        if source_choice == "← Back" or source_choice is None:
+            return None
+        
+        source_file = source_choice
+        
+        if not source_file:
+            return None
+            
+        full_path = os.path.join(self.source_dir, source_file)
+        with open(full_path, 'r', encoding='utf-8') as f:
+            source_data = json.load(f)
+        
+        # Preview all LEDs with frame counts
+        console.print(f"\n[bold]LED configurations from {source_file}:[/]\n")
+        
+        animators = []
+        frame_counts = []
+        choices = []
+        
+        for i in range(3):
+            source_page = source_data['page_data'][5 + i]
+            animator = LEDPreviewAnimator()
+            animator.load_frames(source_page)
+            animators.append(animator)
+            
+            frame_count = self.get_frame_count(source_page)
+            frame_counts.append(frame_count)
+            
+            # Build choice text with frame count info
+            if frame_count <= max_additional_frames:
+                choice_text = f"LED {i+1} ({frame_count} frames) ✓"
+                choices.append(choice_text)
+            else:
+                choice_text = f"LED {i+1} ({frame_count} frames) ❌ Exceeds limit"
+                # Don't add to choices - not selectable
+        
+        # Show animation preview of all LEDs
+        max_frames = max(len(a.frames) for a in animators) if animators else 0
+        if max_frames > 0:
+            frame_delay = min(3.0 / max_frames, 0.2)
+            
+            with Live(refresh_per_second=10, console=console) as live:
+                start_time = time.time()
+                while time.time() - start_time < 3:
+                    previews = []
+                    for i, (animator, fc) in enumerate(zip(animators, frame_counts)):
+                        if fc <= max_additional_frames:
+                            border_style = "green"
+                            status = f"✓ {fc} frames"
+                        else:
+                            border_style = "red"
+                            status = f"❌ {fc} frames (exceeds)"
+                        
+                        panel = Panel(
+                            animator.get_frame_display(),
+                            title=f"[bold]LED {i+1} - {status}[/]",
+                            border_style=border_style
+                        )
+                        previews.append(panel)
+                        animator.current_frame = (animator.current_frame + 1) % max(len(animator.frames), 1)
+                    
+                    columns = Columns(previews, equal=True, expand=True)
+                    live.update(columns)
+                    time.sleep(frame_delay)
+        
+        if not choices:
+            console.print("[red]No LEDs fit within the remaining frame limit![/]")
+            return None
+        
+        source_led = questionary.select(
+            f"Select source LED (max {max_additional_frames} frames):",
+            choices=choices + ["← Back"],
+            style=custom_style,
+            use_shortcuts=True
+        ).ask()
+        
+        if source_led == "← Back" or source_led is None:
+            return None
+        
+        # Extract LED number
+        if "LED 1" in source_led:
+            led_idx = 1
+        elif "LED 2" in source_led:
+            led_idx = 2
+        elif "LED 3" in source_led:
+            led_idx = 3
+        else:
+            led_idx = 1
+        
+        return {
+            "file": source_file,
+            "led": led_idx,
+            "page_data": source_data['page_data'][4 + led_idx],
+            "source_data": source_data,
+            "frame_count": frame_counts[led_idx - 1]
+        }
         
     def configure_all_mappings(self) -> bool:
         """Configure mappings for all 3 custom LEDs"""
@@ -490,15 +619,21 @@ class CyberboardMerger:
         console.print(Panel("[bold cyan]Step 3: Configuration Summary[/]", expand=False))
         
         table = Table(title="LED Mapping Configuration", box=ROUNDED)
-        table.add_column("LED", style="cyan", width=12)
+        table.add_column("LED", style="cyan", width=15)
         table.add_column("Action", style="magenta")
-        table.add_column("Source", style="yellow")
+        table.add_column("Sources/Frames", style="yellow", width=50)
         
         for i in range(1, 4):
             mapping = self.mappings[i]
             if mapping["action"] == "keep":
                 table.add_row(f"Custom LED {i}", "Keep Base", "-")
+            elif mapping["action"] == "combined":
+                sources_str = "\n".join(mapping['sources'][:3])
+                if len(mapping['sources']) > 3:
+                    sources_str += f"\n... and {len(mapping['sources']) - 3} more"
+                table.add_row(f"Custom LED {i}", "Combined", f"{sources_str}\n({mapping['frame_count']} frames)")
             else:
+                # Legacy replace action
                 source = f"{mapping['source_file']} → LED {mapping['source_led']}"
                 table.add_row(f"Custom LED {i}", "Replace", source)
                 
@@ -515,7 +650,10 @@ class CyberboardMerger:
             
             if mapping["action"] == "keep":
                 page_data = self.base_data['page_data'][4 + i]
+            elif mapping["action"] == "combined":
+                page_data = mapping['page_data']
             else:
+                # Legacy replace action
                 page_data = mapping['source_data']['page_data'][4 + mapping['source_led']]
                 
             animator.load_frames(page_data)
@@ -533,9 +671,10 @@ class CyberboardMerger:
             while time.time() - start_time < 3:
                 previews = []
                 for i, animator in enumerate(animators):
+                    frame_info = f"({len(animator.frames)} frames)"
                     panel = Panel(
                         animator.get_frame_display(),
-                        title=f"[bold]Final LED {i+1}[/]",
+                        title=f"[bold]Final LED {i+1} {frame_info}[/]",
                         border_style="green"
                     )
                     previews.append(panel)
@@ -547,7 +686,7 @@ class CyberboardMerger:
         
         choice = questionary.select(
             "\nProceed with merge?",
-            choices=["1. Yes, proceed", "2. No, restart", "← Back to LED mapping"],
+            choices=["Yes, proceed", "No, restart", "← Back to LED mapping"],
             style=custom_style,
             use_shortcuts=True
         ).ask()
@@ -565,7 +704,7 @@ class CyberboardMerger:
         
         save_method = questionary.select(
             "Save method:",
-            choices=["1. Save as new file", "2. Overwrite base file", "← Back"],
+            choices=["Save as new file", "Overwrite base file", "← Back"],
             style=custom_style,
             use_shortcuts=True
         ).ask()
@@ -575,7 +714,7 @@ class CyberboardMerger:
         elif "Overwrite" in save_method:
             confirm = questionary.select(
                 f"\n⚠ This will overwrite {self.base_file}. Continue?",
-                choices=["1. Yes, overwrite", "2. No, go back"],
+                choices=["①  Yes, overwrite", "②  No, go back"],
                 style=custom_style,
                 use_shortcuts=True
             ).ask()
@@ -613,13 +752,20 @@ class CyberboardMerger:
             
             for i in range(1, 4):
                 mapping = self.mappings[i]
-                if mapping["action"] == "replace":
+                target_idx = 4 + i
+                
+                if mapping["action"] == "combined":
+                    # Use the combined page data
+                    merged_data['page_data'][target_idx] = copy.deepcopy(mapping['page_data'])
+                    merged_data['page_data'][target_idx]['page_index'] = target_idx
+                elif mapping["action"] == "replace":
+                    # Legacy replace action
                     source_idx = 4 + mapping['source_led']
-                    target_idx = 4 + i
                     merged_data['page_data'][target_idx] = copy.deepcopy(
                         mapping['source_data']['page_data'][source_idx]
                     )
                     merged_data['page_data'][target_idx]['page_index'] = target_idx
+                # "keep" action doesn't require any changes
                     
                 progress.update(task, advance=1)
                 time.sleep(0.2)
@@ -650,26 +796,32 @@ class CyberboardMerger:
             self.enter_alternate_screen()
             self.display_header()
             
-            # Step 1: Select base file
+            # Main workflow loop
             while True:
+                # Step 1: Select base file
                 if not self.select_base_file():
                     return False
-                break
-            
-            # Step 2: Configure LED mappings with back support
-            while True:
-                if not self.configure_all_mappings():
-                    continue  # Go back to base file selection
-                    
-                # Step 3: Show summary
-                summary_result = self.show_summary()
-                if summary_result == "back":
-                    self.mappings = {}  # Clear mappings
-                    continue  # Go back to LED mapping
-                elif summary_result == "restart":
-                    console.print("\n[yellow]Restarting configuration...[/]")
-                    return False
-                elif summary_result == "proceed":
+                
+                # Step 2: Configure LED mappings with back support
+                led_config_completed = False
+                while True:
+                    if not self.configure_all_mappings():
+                        break  # Go back to base file selection
+                        
+                    # Step 3: Show summary
+                    summary_result = self.show_summary()
+                    if summary_result == "back":
+                        self.mappings = {}  # Clear mappings
+                        continue  # Go back to LED mapping
+                    elif summary_result == "restart":
+                        console.print("\n[yellow]Restarting configuration...[/]")
+                        return False
+                    elif summary_result == "proceed":
+                        led_config_completed = True
+                        break
+                
+                # If LED configuration was completed, exit the main loop
+                if led_config_completed:
                     break
             
             # Step 4: Select save method
