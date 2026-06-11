@@ -1,5 +1,9 @@
 # CYBERBOARD R4 Configuration Merger Tool
 
+![python](https://img.shields.io/badge/python-3.8%2B-blue) ![type](https://img.shields.io/badge/type-CLI%20%2F%20TUI-blue) ![ui](https://img.shields.io/badge/ui-rich%20%2B%20questionary-purple) ![platform](https://img.shields.io/badge/platform-terminal-grey)
+
+![CYBERBOARD R4 Configuration Merger hero banner](assets/hero.jpg)
+
 A command-line tool for merging custom LED configurations from multiple CYBERBOARD R4 JSON configuration files.
 
 ## Features
@@ -7,7 +11,7 @@ A command-line tool for merging custom LED configurations from multiple CYBERBOA
 - **Rich Terminal UI**: Beautiful interface with boxes, colors, and animations
 - **Alternate Screen Buffer**: Full-screen application experience like vim/htop - preserves your console history
 - **LED Preview**: Real-time 40x5 LED animations (3 seconds each, synchronized with max frame count)
-- **Interactive Navigation**: 
+- **Interactive Navigation**:
   - Number key shortcuts (1-9) for quick selection
   - Arrow keys for menu navigation
   - Back functionality (← Back) at every step
@@ -65,12 +69,14 @@ cyberboard-merger
 ## File Structure
 
 The tool works with CYBERBOARD R4 JSON files containing:
+
 - Page 0-4: System pages (battery, mosaic, time, etc.)
 - Page 5-7: Custom LED configurations (Custom LED 1-3)
 
 ## LED Preview
 
 The tool displays LED animations as a 40x5 grid using colored blocks (█) in your terminal:
+
 - **3-second animations**: Each preview runs for exactly 3 seconds
 - **Adaptive frame rate**: Speed automatically adjusts based on the animation with the most frames
 - **True color support**: RGB values from JSON are displayed as actual colors
